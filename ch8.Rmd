@@ -5,26 +5,227 @@ date: "`r format(Sys.Date())`"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+# Quelques outils en écologie mathématique avec R
+
+Il arrive souvent ques les données brutes ne soient pas exprimées de manière appropriée ou optimale pour l’analyse statistique ou la modélisation. Vous devrez alors effectuer un prétraitement sur ces données.
+
+Un prétraitement peut consister simplement en une transformation logarithmique ou exponentielle. Nous verrons les transformations les plus communes comme la standardisation, la mise à l’échelle sur une étendue et la normalisation. Puis nous verrons comment ces opérations de prétraitement sont offertes dans le module `recipes`.
+
+`recipes` n’est pas en mesure d’effectuer toutes les transformations imaginables. Pour des opérations plus spécialisées, si vos données forment une partie d’un tout (exprimées en pourcentages ou fractions), vous devriez probablement utiliser un prétraitement grâce aux outils de l’analyse compositionnelle. Avant de les aborder, nous allons traiter des transformations de base.
+
+## Standardisation
+
+La standardisation consiste à centrer vos données à une moyenne de 0 et à les échelonner à une variance de 1.
+
+Ce prétraitement des données peut s’avérér utile lorsque la modélisation tient compte de l’échelle de vos mesures (par exemple, les paramètres de régression vus au chapitre 6 ou les distances que nous verrons au chapitre 9). En effet, les pentes d’une régression linéaire multiple ne pourront être comparées entre elles que si elles sont une même échelle. Par exemple, on veut modéliser la consommation en miles au gallon (mpg) de voitures en fonction de leur puissance (hp), le temps en secondes pour parcourir un quart de mile (qsec) et le nombre de cylindre.
+
+
+```{r}
+data("mtcars")
+modl <- lm(mpg ~ hp + qsec + cyl, mtcars)
+summary(modl)
+```
+Les pentes signifient que la distance parcourue par gallon d’essence diminue de 0.03552 miles au gallon pour chaque HP, de 0.89242 par seconde au quart de mile et de 2.2696 par cyclindre additionnel. L’interprétation est conviviale à cette échelle. Mais lequel de ces effets est le plus important? L t value indique que ce seraient les cylindres. Mais pour juger l’importance en terme de pente, il vaudrait mieux standardiser.
+
+```{r}
+library("tidyverse")
 ```
 
-## R Markdown
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+```{r}
+standardise <- function(x) 
+  (x-mean(x))/sd(x)
+mtcars_sc <- mtcars %>%
+  mutate_if(is.numeric, standardise) # ou bien scale(mtcars, center = TRUE, scale = TRUE)
+modl_sc <- lm(mpg ~ hp + qsec + cyl, mtcars_sc)
+summary(modl_sc)
+```
+Les valeurs des pentes ne peuvent plus être interprétées directement, mais peuvent maintenant être comparées entre elles. Dans ce cas, le nombre de cilyndres a en effet une importance plus grande que la puissance et le temps pour parcourir un 1/4 de mile.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+Les algorithmes basés sur des distances auront, de même, avantage à être standardisés.
 
-```{r cars}
-summary(cars)
+## À l’échelle de la plage
+
+Si vous désirez préserver le zéro dans le cas de données positives ou plus généralement vous voulez que vos données prétraitées soient positives, vous pouvez les transformer à l’échelle de la plage, c’est-à-dire les forcer à s’étaler de 0 à 1:
+
+Cette transformation est sensible aux valeurs aberrantes, et une fois le vecteur transformé les valeurs aberrantes seront toutefois plus difficiles à détecter.
+
+```{r}
+range_01 <- function(x) (x-min(x))/(max(x) - min(x))
+mtcars %>%
+  mutate_if(is.numeric, range_01) %>% # en fait, toutes les colonnes sont numériques, alors mutate_all aurait pu être utilisé au lieu de mutate_if
+  sample_n(4)
 ```
 
-## Including Plots
+## Normaliser
 
-You can also embed plots, for example:
+Le terme *normaliser* est associer à des opérations différentes dans la littérature. Nous prendrons la nomenclature de scikit-learn, pour qui la normalisation consiste à faire en sorte que la longueur du vecteur (sa norme, d’où normaliser) soit unitaire. Cette opération est le plus souvent utilisée par observation (ligne), non pas par variable (colonne). Il existe plusieurs manières de mesures la distance d’un vecteur, mais la plus commune est la distance euclidienne.
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r}
+library("pls")
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r}
+data("gasoline")
+spectro <- gasoline$NIR %>% unclass() %>% as_tibble()
+
+normalise <- function(x) x/sqrt(sum(x^2))
+spectro_norm <- spectro %>% 
+  rowwise() %>% # différentes approches possibles pour les opérations sur les lignes
+  normalise()
+spectro_norm[1:4, 1:4]
+```
+
+## Le module recipes
+
+Nous avons vu comment standardiser avec notre propre fonction. Certaines personnes préfèrent utiliser la fonction `scale()`. Mais une nouvelle approche est en train de s’installer, avec le module `recipes`, un module de l’ombrelle `tidymodels`, un méta module en développement visant à faire de R un outil de modélisation plus convivial.
+
+`recipes` fonctionne en mode *tidyverse*, c’est-à-dire en suites d’opérations. De nombreuses fonctions sont offertes, dont des fonctions d’imputation, que nous verrons au chapitre 10. Nous couvrirons ici la standardisation et la mise à l’échelle, juste pour l’apéro 🍳.
+
+Le module ne s’appelle pas recette pour rien. Il fonctionne en trois étapes:
+
+1. Monter la liste des ingrédients: spécifier ce qu’il faut faire
+1. Mélanger les ingrédients: transformer tout ce qu’il faut faire en une procédure
+1. Cuire les ingrédients: appliquer la procédure à un tableau.
+
+Voici une petite application sur le tableau `lasrosas.corn`.
+
+```{r, warning=FALSE, message = FALSE, error = FALSE}
+library("tidymodels")
+```
+
+
+```{r}
+data(lasrosas.corn, package = "agridat")
+lasrosas.corn %>% 
+  head()
+```
+
+Disons que pour mon modèle statistique, ma variable de sortie est le rendement (yield), que je désire lier à la dose d’azote (nitro), à un indicateur de la teneur en matière organique du sol (bv) et à la topographie (topo).
+
+Mais pour rendre le modèle prédictif (et non pas seulement descriptif), je dois l’évaluer sur des données qui n’ont pas servies à lisser le modèle (nous verrons en plus de détails ça au chapitre 12). Je vais donc séparer mon tableau au hasard en un tableau d’entraînement comprenant 70% des observations et un autre pour tester le modèle comprenant le 30% restant.
+
+```{r}
+train_test_split <- lasrosas.corn %>% 
+  select(yield, nitro, bv, topo) %>% 
+  initial_split(prop = 0.7)
+train_df <- training(train_test_split)
+test_df <- testing(train_test_split)
+```
+
+Voici ma recette. Je l’expliquerai tout de suite après.
+
+
+```{r}
+recette <- recipe(yield ~ ., data = train_df) %>% 
+  step_zv(all_numeric()) %>%  #retirer les variables dont la variance est non-nulle, ce qui est pratique pour éviter que la standardisation divise par 0
+  step_normalize(all_numeric(), -all_outcomes()) %>%  #je standardise avec la fonction step_normalize() et la standardisation n’est applicable que sur les entrées numériques du modèle
+  step_downsample(topo) %>%  #retire des obsservations pour faire en sorte que les catégories d’une variable apparaissent toutes en même nombre
+  step_dummy(topo) %>%  #je désire que la variable topo subisse un enodage catégoriel
+  prep() #Puis je mélange mes ingrédients avec cette fonction
+
+```
+
+```{r}
+recette
+```
+
+La recette étant bien mélangée, on peut en extraire le jus avec la fonction `bake()`, qui permet de générer le tableau transformé.
+
+```{r}
+test_proc <- bake(recette, test_df)
+test_proc %>% sample_n(5)
+
+```
+
+La fonction `bake()` peut aussi être appliquée au données d’entraînement, mais certaines étapes de recette doivent passer par des opérations particulières, comme `step_downsample()` Il est donc préférable, pour les données d’entrâinement, d’en extraire le jus avec la fonction `juice()`.
+
+```{r}
+
+train_proc <- juice(recette, train_df)
+train_proc %>% sample_n(5)
+
+```
+
+Le tableau train_proc peut être envoyé dans un modèle de votre choix! Par exemple,
+
+```{r}
+lm(yield ~ ., train_proc) %>% 
+  summary()
+```
+
+## Analyse compositionnelle en R
+
+En 1898, le statisticien Karl Pearson nota que des corrélations étaient induites lorsque l’on effectuait des ratios par rapport à une variable commune.
+
+Faisons l’exercice! Nous générons au hasard 1000 données (comme le proposait Pearson) pour trois dimensions: le fémur, le tibia et l’humérus. Ces dimensions ne sont pas générées par des distributions corrélées.
+
+```{r}
+set.seed(3570536)
+n <- 1000
+bones <- tibble(femur = rnorm(n, 10, 3),
+                tibia = rnorm(n, 8, 2),
+                humerus = rnorm(n, 6, 2))
+plot(bones)
+```
+
+
+
+```{r}
+cor(bones)
+```
+
+Pourtant, si j’utilise des ratios allométriques avec l’humérus comme base,
+
+```{r}
+bones_r <- bones %>% 
+  transmute(fh = femur/humerus,
+            th = tibia/humerus)
+plot(bones_r)
+round(cor(bones_r$fh, bones_r$th), 2)
+#text(30, 20, paste("corrélation =", round(cor(bones_r$fh, bones_r$th), 2)), col = "blue")
+
+```
+
+
+
+```{r}
+
+```
+
+
+
+```{r}
+
+```
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+```{r}
+
+```
+
+
+
+
